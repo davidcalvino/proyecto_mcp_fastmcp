@@ -49,17 +49,29 @@ async def process_agent_turn(input_list: list, session: ClientSession, openai_to
     except Exception as e:
         return f"Error crítico al comunicarse con OpenAI: {str(e)}"
     
+    output_items = getattr(response, "output", [])
+    if output_items is None:
+        output_items = []
+    elif not isinstance(output_items, (list, tuple)):
+        output_items = [output_items]
+        
     # Agregar todos los outputs al historial para dar contexto continuo
-    if response.output:
-        input_list.extend(response.output)
+    if output_items:
+        input_list.extend(output_items)
     
-    # Extraer los tool_calls si el modelo decidió usar herramientas
-    tool_calls = [item for item in response.output if item.type == "function_call"]
+    tool_calls = []
+    for item in output_items:
+        if getattr(item, "type", None) == "function_call" and hasattr(item, "call_id"):
+            tool_calls.append(item)
     
     if tool_calls:
         for tool_call in tool_calls:
-            name = tool_call.name
-            args = json.loads(tool_call.arguments)
+            name = getattr(tool_call, "name", "")
+            raw_args = getattr(tool_call, "arguments", "{}")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = {}
             
             try:
                 # Ejecutar herramienta a través del protocolo MCP con reintentos
@@ -67,15 +79,14 @@ async def process_agent_turn(input_list: list, session: ClientSession, openai_to
                 
                 # Extraer texto de la respuesta MCP
                 content_list = []
-                for res_item in result.content:
-                    if res_item.type == "text":
-                        content_list.append(res_item.text)
+                if hasattr(result, "content") and isinstance(result.content, list):
+                    for res_item in result.content:
+                        if getattr(res_item, "type", None) == "text" and hasattr(res_item, "text"):
+                            content_list.append(res_item.text)
                 content_str = "\n".join(content_list)
             except Exception as e:
-                # Error en la herramienta devuelto como contexto a OpenAI
                 content_str = f"Error al ejecutar {name}: {str(e)}"
             
-            # Formato requerido por la Responses API para el resultado
             input_list.append({
                 "type": "function_call_output",
                 "call_id": tool_call.call_id,
@@ -85,5 +96,5 @@ async def process_agent_turn(input_list: list, session: ClientSession, openai_to
         # Llamada recursiva tras procesar herramientas
         return await process_agent_turn(input_list, session, openai_tools)
     
-    return response.output_text
+    return getattr(response, "output_text", str(response))
 
